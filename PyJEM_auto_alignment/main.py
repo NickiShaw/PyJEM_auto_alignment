@@ -28,14 +28,76 @@ class TEMControl:
     self.stage_object.SetTiltYAngle(val)
     '''
 
-def collectPhosphorImage(self, show = False):
-    bufferimg = detector.Detector(0).snapshot_rawdata()
-    img = np.frombuffer(bufferimg, dtype='uint16')
-    # c = img.reshape(580, 580)
+
+def collectPhosphorImage(show=False):
+    if offline:
+        image_dir = "test.tif"
+        img = cv2.imread(image_dir, 1)
+
+    else:
+        bufferimg = detector.Detector('TVCAM_SCR_L').snapshot('tiff')
+        img = Image.open(io.BytesIO(bufferimg))
     if show:
-        plt.imshow(img, cmap=plt.cm.gray)
+        plt.imshow(img, cmap='gray')
         plt.show()
     return img
+
+
+def collectMetadata():
+    mag = TEM3.EOS3().GetMagValue()[0]
+    spot = TEM3.EOS3().GetSpotSize() + 1
+    angle = TEM3.EOS3().GetAlpha() + 1
+    brightness = TEM3.Lens3().GetCL3()
+
+    return {'MAG': mag, 'SPOT': spot, 'ANGLE': angle, 'BRI': brightness}
+
+
+def getBeamSize(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=0, contoursmax=1):
+    image = collectPhosphorImage()
+    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Check that there is beam.
+    image_8bit = cv2.normalize(gray_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    if not any(np.array(image_8bit).flatten() > beamthreshold):
+        return "There is no beam."
+
+    _, thresholded_img = cv2.threshold(gray_image, 0, contourthreshold, cv2.THRESH_BINARY)
+    contour, _ = cv2.findContours(thresholded_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+    # plt.imshow(thresholded_img, cmap='gray')
+    # plt.show()
+
+    filtered_contours = []
+    for c in contour:
+        # remove small contours
+        if cv2.contourArea(c) > minbeamsize:
+            filtered_contours.append(c)
+
+    # Stop if there are too many contours.
+    if len(filtered_contours) > contoursmax:
+        return "Contours exceed limit."
+
+    # Stop if contours are touching edges.
+    height, width, channels = image.shape
+    for i, c in enumerate(filtered_contours):
+        flat_contours = np.array(c).flatten()
+        if any(flat_contours == int(height)) or any(flat_contours == int(width)):
+            return "Beam is on edge."
+
+    # Draw contours and return area.
+    areas = []
+    for c in filtered_contours:
+        cv2.drawContours(image, [c], -1, (0, 255, 0), 2)
+        area = cv2.contourArea(c)
+        areas.append(area)
+        # print(f"Area of the contour: {area} pixels")
+
+    if show:
+        plt.imshow(image)
+        plt.show()
+
+    return areas
+
 
 def confirm_tilt_state(offline=False):
     '''
@@ -82,103 +144,7 @@ def confirm_tilt_state(offline=False):
     return True
 
 
-
-image_dir = "test.tif"
-
-# Get the contours for an image with a set threshold.
-def getContours(image, low, high):
-    grey_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    _, thresholded_img = cv2.threshold(grey_img, low, high, cv2.THRESH_BINARY)
-    contour, _ = cv2.findContours(thresholded_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    return contour, thresholded_img
-
-
-class ContourSet:
-    def __init__(self, contours, width, height):
-        self.contours = contours
-        self.width = width
-        self.height = height
-        self.area = width * height
-
-    # Obtain index of the contour corresponding to the scalebar.
-    def getScalebar(self):
-        contour_widths = []
-        for i in range(len(self.contours)):
-            x, y, w, h = cv2.boundingRect(self.contours[i])
-            # Only include contour widths with width < width of the image, and the height < 5% height of the image.
-            if w < self.width and h < self.height / 20:
-                contour_widths.append(w)
-        # Get index of longest contour and the length of that contour.
-        return contour_widths.index(max(contour_widths)), max(contour_widths)
-
-    # Filter out small contours and parts touching sides of image.
-    def filterSmallContours(self, minimum_contour):
-        new_prtcle_contours = []
-        pointlist = []
-        for c in self.contours:
-            _, _, w, h = cv2.boundingRect(c)
-            rect_area = w * h
-            # Keep contours that area above the specified area.
-            if self.area * minimum_contour < rect_area:
-                # For new contour object.
-                new_prtcle_contours.append(c)
-                # For getting contour pixels.
-                pointlist.append(c.tolist())
-        flat_pointlist = []
-        for e1 in pointlist:
-            for e2 in e1:
-                for e3 in e2:
-                    if e3[0] != 0 and e3[0] != self.width and e3[1] != 0 and e3[0] != self.height:
-                        flat_pointlist.append(e3)
-        return new_prtcle_contours, flat_pointlist
-
-
-
-
 if __name__ == "__main__":
-
-    image = cv2.imread(image_dir, 1)
-    grey_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    plt.imshow(grey_img, cmap='gray')
-    plt.show()
-
-    ksize = (2, 2)  # (8, 8)
-    blur_image = cv2.blur(grey_img, ksize)
-
-    height, width, channels = image.shape
-
-    low = 0
-    high = 190
-    _, thresholded_img = cv2.threshold(blur_image, low, high, cv2.THRESH_BINARY)
-    contour, _ = cv2.findContours(thresholded_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-    plt.imshow(thresholded_img, cmap='gray')
-    plt.show()
-
-    # kernel = np.ones((10, 10), np.uint8)
-    # gradient = cv2.morphologyEx(image, cv2.MORPH_GRADIENT, kernel)
-    #
-    # plt.imshow(gradient, cmap='gray')
-    # plt.show()
-
-    filtered_contours = []
-    for c in contour:
-        # remove small contours
-        if cv2.contourArea(c) > 0:
-            filtered_contours.append(c)
-
-    # for i, c in enumerate(filtered_contours):
-    #     # remove contours touching edges.
-    #     flat_contours = np.concatenate(c)
-    #     for x in [0, int(width), int(height)]:
-    #         if x in flat_contours:
-    #             filtered_contours.pop(i)
-    #             break
-
-    # draw contours.
-    for c in contour:
-        cv2.drawContours(image, [c], -1, (0, 255, 0), 2)
-
-    plt.imshow(image)
-    plt.show()
+    # image = collectPhosphorImage()
+    # beamsize = getBeamSize()
+    # meta = collectMetadata()
