@@ -14,6 +14,7 @@ from statistics import mean
 from matplotlib import pyplot as plt
 from scipy.special import expit, logit
 from PIL import Image
+import io
 
 
 class TEMControl:
@@ -51,15 +52,26 @@ def collectMetadata():
 
     return {'MAG': mag, 'SPOT': spot, 'ANGLE': angle, 'BRI': brightness}
 
+class NoBeamError(ValueError):
+    pass
 
-def getBeamSize(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=0, contoursmax=1):
+class TooManyContoursError(ValueError):
+    pass
+
+class BeamOnEdgeError(ValueError):
+    pass
+
+class TooSmallContoursError(ValueError):
+    pass
+
+def getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=2, contoursmax=1, getarea=False):
     image = collectPhosphorImage()
     gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     # Check that there is beam.
     image_8bit = cv2.normalize(gray_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     if not any(np.array(image_8bit).flatten() > beamthreshold):
-        return "There is no beam."
+        raise NoBeamError()
 
     _, thresholded_img = cv2.threshold(gray_image, 0, contourthreshold, cv2.THRESH_BINARY)
     contour, _ = cv2.findContours(thresholded_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -73,30 +85,36 @@ def getBeamSize(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=
         if cv2.contourArea(c) > minbeamsize:
             filtered_contours.append(c)
 
+    # Stop if there are no contours left.
+    if len(filtered_contours) == 0:
+        raise TooSmallContoursError()
+
     # Stop if there are too many contours.
     if len(filtered_contours) > contoursmax:
-        return "Contours exceed limit."
+        raise TooManyContoursError()
 
     # Stop if contours are touching edges.
     height, width, channels = image.shape
     for i, c in enumerate(filtered_contours):
         flat_contours = np.array(c).flatten()
         if any(flat_contours == int(height)) or any(flat_contours == int(width)):
-            return "Beam is on edge."
-
-    # Draw contours and return area.
-    areas = []
-    for c in filtered_contours:
-        cv2.drawContours(image, [c], -1, (0, 255, 0), 2)
-        area = cv2.contourArea(c)
-        areas.append(area)
-        # print(f"Area of the contour: {area} pixels")
-
+            raise BeamOnEdgeError()
     if show:
+        for c in filtered_contours:
+            cv2.drawContours(image, [c], -1, (0, 255, 0), 2)
         plt.imshow(image)
         plt.show()
 
-    return areas
+    if getarea:
+        # Draw contours and return area.
+        areas = []
+        for c in filtered_contours:
+            area = cv2.contourArea(c)
+            areas.append(area)
+            # print(f"Area of the contour: {area} pixels")
+        return areas
+    else:
+        return image, filtered_contours
 
 
 def confirm_tilt_state(offline=False):
@@ -143,8 +161,63 @@ def confirm_tilt_state(offline=False):
 
     return True
 
+def centerBeam(shiftscale=1, tolerance=40, shift_function="CLA1", max_iterations=10):
+    """
+    Iteratively shifts beam until it is centered within tolerance.
+    """
+    for iteration in range(max_iterations):
+        try:
+            minbeamsize = 2
+            image, contour = getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=minbeamsize, contoursmax=1, getarea=False)
+
+            height, _, _ = image.shape  # assume height = width
+
+            # Get contour center
+            M = cv2.moments(contour[0])
+            if M['m00'] == 0:
+                ValueError("Zero contour area found, there is an issue.")
+                continue
+
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+
+            # Check if centered
+            if abs(cx - height//2) <= tolerance and abs(cy - height//2) <= tolerance:
+                print(f"Beam is centered (iteration {iteration+1}).")
+                break
+
+            # Calculate shift
+            delta_cx = cx - height
+            delta_cy = cy - height
+
+            if shift_function == "CLA1":
+                ix, iy = TEM3.Def3().GetCLA1()
+                TEM3.Def3().SetGunA1(ix + delta_cx * shiftscale,
+                                     iy + delta_cy * shiftscale)
+                print(f"Iteration {iteration+1}: Shifted by ({delta_cx}, {delta_cy})")
+            else:
+                raise ValueError("alignBeam did not receive a valid 'shift_function'")
+
+        except NoBeamError:
+            print("No beam detected — adjust alignment.")
+            break
+        except TooManyContoursError:
+            print("Too many contours — lower contour threshold or clean image.")
+            break
+        except TooSmallContoursError:
+            print(f"Contours were all removed by filtering, minbeamsize was {minbeamsize}")
+            break
+        except BeamOnEdgeError:
+            print("Beam is on edge — recenter.")
+            break
+    else:
+        print("Max iterations reached, beam may not be centered.")
+
+
+
 
 if __name__ == "__main__":
+    centerBeam()
     # image = collectPhosphorImage()
     # beamsize = getBeamSize()
     # meta = collectMetadata()
