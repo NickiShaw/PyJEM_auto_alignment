@@ -1,8 +1,10 @@
 try:
     from PyJEM import TEM3, detector
+
     offline = False
 except:
     from PyJEM.offline import TEM3, detector
+
     offline = True
 
 import numpy as np
@@ -16,6 +18,7 @@ from scipy.special import expit, logit
 from PIL import Image
 import io
 from time import sleep
+from functools import partial
 
 
 class TEMControl:
@@ -40,7 +43,7 @@ def collectPhosphorImage(show=False):
         bufferimg = detector.Detector('TVCAM_SCR_L').snapshot('tiff')
         image_array = np.frombuffer(bufferimg, dtype=np.uint8)
         img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-        #img = Image.open(io.BytesIO(image_array))
+        # img = Image.open(io.BytesIO(image_array))
     if show:
         plt.imshow(img, cmap='gray')
         plt.show()
@@ -55,23 +58,28 @@ def collectMetadata():
 
     return {'MAG': mag, 'SPOT': spot, 'ANGLE': angle, 'BRI': brightness}
 
+
 class NoBeamError(ValueError):
     pass
+
 
 class TooManyContoursError(ValueError):
     pass
 
+
 class BeamOnEdgeError(ValueError):
     pass
+
 
 class TooSmallContoursError(ValueError):
     pass
 
+
 def getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=2, contoursmax=1, getarea=False):
     image = collectPhosphorImage()
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)#cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    #plt.imshow(gray_image, cmap='gray')
-    #plt.show()
+    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    # plt.imshow(gray_image, cmap='gray')
+    # plt.show()
     # Check that there is beam.
     image_8bit = cv2.normalize(gray_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     if not any(np.array(image_8bit).flatten() > beamthreshold):
@@ -79,7 +87,6 @@ def getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsi
 
     _, thresholded_img = cv2.threshold(gray_image, 0, contourthreshold, cv2.THRESH_BINARY)
     contour, _ = cv2.findContours(thresholded_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    
 
     filtered_contours = []
     for c in contour:
@@ -95,7 +102,7 @@ def getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsi
     if len(filtered_contours) > contoursmax:
         raise TooManyContoursError()
 
-    # Stop if contours are touching edges.
+    # Stop if contours are touching edges. #TODO test case on scope doesnt throw error.
     height, width, channels = image.shape
     for i, c in enumerate(filtered_contours):
         flat_contours = np.array(c).flatten()
@@ -119,58 +126,84 @@ def getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsi
         return image, filtered_contours
 
 
-def confirm_tilt_state(offline=False):
-    '''
-    Confirms the tilt state of the TEM.
-    :return: True if the TEM is in tilt state, False otherwise.
-    '''
+class HTOffError(ValueError):
+    pass
+
+
+class EmissionOffError(ValueError):
+    pass
+
+
+class BeamValveClosedError(ValueError):
+    pass
+
+
+class BeamBlankedError(ValueError):
+    pass
+
+
+class HolderNotInserted(ValueError):
+    pass
+
+
+class NotMagMode(ValueError):
+    pass
+
+
+def confirm_microscope_state(offline=False):
     if offline:
         return True
-
-    # HT and emission on.
+    # Check HT on.
     if TEM3.HT3().GetHtValue() != 200000.0:
-        return False
-    # TODO look for GetEmissionOnStatus
-    # Beam valve open.
-    if TEM3.FEG3().GetBeamValve() == 0:
-        return False
+        raise HTOffError()
+    # Check emission on.
+    if TEM3.GUN3().GetEmissionCurrentValue() == 0.0:
+        raise EmissionOffError()
+    # Check beam valve open.
+    if TEM3.FEG3().GetBeamValve() == 0:  # 0=closed
+        raise BeamValveClosedError()
     # Beam not blanked.
-    if TEM3.Def3().GetBeamBlank() == 1: # 1=ON
-        return False
+    if TEM3.Def3().GetBeamBlank() == 1:  # 1=ON
+        raise BeamBlankedError()
     # Holder is inserted.
-    if TEM3.Stage3().GetHolderStts() == 0: # 0=OUT
-        return False
-    # CL 2 inserted, no other apertures are inserted.
-    # 1=CLA, 2=OLA, 3=HCA, 4=SAA, 5=ENTA (N/A), 6=EDS
-    for apt in [1,2,3,4,6]:
-        TEM3.Apt3().SelectKind(apt)
-        if apt == 1:
-            TEM3.Apt3().SelectSize(2)
-        else:
-            TEM3.Apt3().SelectSize(0)
-    # Focusing screen not inserted.
-    # TEM mode, TEM illumination.
-    if TEM3.EOS3.GetFunctionMode()[0] == 0: # TEM MAG mode
-        return False
-    # Mag should be 100kx.
-    if TEM3.EOS3().GetMagValue() != 100000:
-        return False
-    # TODO set brightness value
-
-    detector.Detector(0).livestart()
-    detector.Detector(0).set_exposuretime_value(120)  # 0.12 s
-    detector.Detector(0).set_gainindex(0.5)  # actually sets gain to 1
+    if TEM3.Stage3().GetHolderStts() == 0:  # 0=OUT
+        raise HolderNotInserted()
+    # TODO get TEM mode and illumination mode
+    # Check MAG mode.
+    if TEM3.EOS3().GetFunctionMode()[0] == 0:  # TEM MAG mode
+        raise NotMagMode()
+    # Start camera view and set exposure/gain settings.
+    detector.Detector('TVCAM_SCR_L').livestart()
+    detector.Detector('TVCAM_SCR_L').set_exposuretime_value(120)  # 0.12 s
+    detector.Detector('TVCAM_SCR_L').set_gainindex(0.5)  # actually sets gain to 1
 
     return True
 
-def centerBeam(shiftscale=10, tolerance=10, shift_function="CLA1", max_iterations=10):
+
+def beamShift(delta_x, delta_y, shiftscale):
+    ix, iy = TEM3.Def3().GetCLA1()
+    TEM3.Def3().SetCLA1(ix + delta_x * shiftscale, iy - delta_y * shiftscale)
+
+
+def apertureShift(delta_x, delta_y, KIND, SIZE, shiftscale):
+    # left x: lowers ax value, moves beam up.
+    # up y:  increases ay value, moves beam right.
+    # Initialise aperture.
+    TEM3.Apt3().SelectKind(KIND)
+    TEM3.Apt3().SetSize(SIZE)
+    ix, iy = TEM3.Apt3().GetPosition()
+    TEM3.Apt3().SetPosition(ix + delta_x * shiftscale, iy - delta_y * shiftscale)
+
+
+def centerBeam(shift_function, tolerance=10, max_iterations=10):
     """
     Iteratively shifts beam until it is centered within tolerance.
     """
     for iteration in range(max_iterations):
         try:
             minbeamsize = 2
-            image, contour = getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=minbeamsize, contoursmax=1, getarea=False)
+            image, contour = getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=minbeamsize,
+                                            contoursmax=1, getarea=False)
 
             height, _, _ = image.shape  # assume height = width
 
@@ -184,22 +217,19 @@ def centerBeam(shiftscale=10, tolerance=10, shift_function="CLA1", max_iteration
             cy = int(M['m01'] / M['m00'])
 
             # Check if centered
-            if abs(cx - height//2) <= tolerance and abs(cy - height//2) <= tolerance:
-                print(f"Beam is centered (iteration {iteration+1}).")
+            if abs(cx - height // 2) <= tolerance and abs(cy - height // 2) <= tolerance:
+                print(f"Beam is centered (iteration {iteration + 1}).")
                 break
 
             # Calculate shift
-            delta_cx = cx - height//2
-            delta_cy = cy - height//2
+            delta_cx = cx - height // 2
+            delta_cy = cy - height // 2
             print(f"shift x {delta_cx} : shift y {delta_cy}")
 
-            if shift_function == "CLA1":
-                ix, iy = TEM3.Def3().GetCLA1()
-                TEM3.Def3().SetCLA1(ix + delta_cx * shiftscale,
-                                     iy - delta_cy * shiftscale)
-                print(f"Iteration {iteration+1}: Shifted by ({delta_cx}, {delta_cy})")
-                #sleep(5)
-            else:
+            try:
+                shift_function(delta_cx, delta_cy)
+                print(f"Iteration {iteration + 1}: Shifted by ({delta_cx}, {delta_cy})")
+            except:
                 raise ValueError("alignBeam did not receive a valid 'shift_function'")
 
         except NoBeamError:
@@ -218,10 +248,22 @@ def centerBeam(shiftscale=10, tolerance=10, shift_function="CLA1", max_iteration
         print("Max iterations reached, beam may not be centered.")
 
 
-
-
 if __name__ == "__main__":
-    centerBeam()
+    confirm_microscope_state()
+    centerBeam(shift_function=partial(apertureShift, KIND=1, SIZE=2, shiftscale=1))
+    centerBeam(shift_function=partial(beamShift, shiftscale=1))
+
+    # print(collectMetadata())
+
+    # TEM3.Apt3().SelectKind(1)
+    # TEM3.Apt3().SetSize(2)
+
+    # ax,ay = TEM3.Apt3().GetPosition()
+    # print(ax,ay)
+    # left x: lowers ax value, moves beam up.
+    # up y:  increases ay value, moves beam right.
+    # TEM3.Apt3().SetPosition(ax-20,ay)
+
     # image = collectPhosphorImage()
     # beamsize = getBeamSize()
     # meta = collectMetadata()
