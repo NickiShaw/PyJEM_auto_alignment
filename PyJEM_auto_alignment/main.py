@@ -195,7 +195,7 @@ def apertureShift(delta_x, delta_y, KIND, SIZE, shiftscale):
     TEM3.Apt3().SetPosition(ix + delta_x * shiftscale, iy - delta_y * shiftscale)
 
 
-def centerBeam(shift_function, tolerance=10, max_iterations=10):
+def centerBeam(image, shift_function, tolerance=10, max_iterations=10):
     """
     Iteratively shifts beam until it is centered within tolerance.
     """
@@ -203,7 +203,7 @@ def centerBeam(shift_function, tolerance=10, max_iterations=10):
         try:
             minbeamsize = 2
             image, contour = getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=minbeamsize,
-                                            contoursmax=1, getarea=False)
+                                            contoursmax=1, getarea=False)[0]
 
             height, _, _ = image.shape  # assume height = width
 
@@ -231,6 +231,42 @@ def centerBeam(shift_function, tolerance=10, max_iterations=10):
                 print(f"Iteration {iteration + 1}: Shifted by ({delta_cx}, {delta_cy})")
             except:
                 raise ValueError("alignBeam did not receive a valid 'shift_function'")
+
+        except NoBeamError:
+            print("No beam detected — adjust alignment.")
+            break
+        except TooManyContoursError:
+            print("Too many contours — lower contour threshold or clean image.")
+            break
+        except TooSmallContoursError:
+            print(f"Contours were all removed by filtering, minbeamsize was {minbeamsize}")
+            break
+        except BeamOnEdgeError:
+            print("Beam is on edge — recenter.")
+            break
+    else:
+        print("Max iterations reached, beam may not be centered.")
+
+def changeBeamSize(image, target_percentage=60, tolerance=5, max_iterations=10):
+    """
+        Iteratively changes brightness until beam is % of frame (within tolerance).
+        """
+    for iteration in range(max_iterations):
+        try:
+            minbeamsize = 2
+            beam_area = getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=minbeamsize,
+                                            contoursmax=1, getarea=True)[0]
+
+            height, _, _ = image.shape  # assume height = width
+
+            beam_percent = beam_area // (height ** 2) * 100
+
+            if abs(beam_percent - target_percentage) <= tolerance:
+                print(f"Beam is near target: {beam_percent} (iteration {iteration + 1}).")
+                break
+
+            brightness = TEM3.Lens3().GetCL3()
+            TEM3.Lens3().SetCL3(brightness + (beam_percent - target_percentage) * 1) # find val (should be consistent)
 
         except NoBeamError:
             print("No beam detected — adjust alignment.")
