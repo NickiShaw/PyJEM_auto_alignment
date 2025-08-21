@@ -121,7 +121,7 @@ def getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsi
             area = cv2.contourArea(c)
             areas.append(area)
             # print(f"Area of the contour: {area} pixels")
-        return areas
+        return image, areas
     else:
         return image, filtered_contours
 
@@ -185,17 +185,17 @@ def beamShift(delta_x, delta_y, shiftscale):
     TEM3.Def3().SetCLA1(ix + delta_x * shiftscale, iy - delta_y * shiftscale)
 
 
-def apertureShift(delta_x, delta_y, KIND, SIZE, shiftscale):
+def apertureShift(delta_x, delta_y, KIND, SIZE):
     # left x: lowers ax value, moves beam up.
     # up y:  increases ay value, moves beam right.
     # Initialise aperture.
     TEM3.Apt3().SelectKind(KIND)
     TEM3.Apt3().SetSize(SIZE)
     ix, iy = TEM3.Apt3().GetPosition()
-    TEM3.Apt3().SetPosition(ix + delta_x * shiftscale, iy - delta_y * shiftscale)
+    TEM3.Apt3().SetPosition(ix * np.sign(delta_x), iy * np.sign(delta_y)) # only move one step at a time.
 
 
-def centerBeam(image, shift_function, tolerance=10, max_iterations=10):
+def centerBeam(shift_function, tolerance=10, max_iterations=10):
     """
     Iteratively shifts beam until it is centered within tolerance.
     """
@@ -247,15 +247,16 @@ def centerBeam(image, shift_function, tolerance=10, max_iterations=10):
     else:
         print("Max iterations reached, beam may not be centered.")
 
-def changeBeamSize(image, target_percentage=60, tolerance=5, max_iterations=10):
+def changeBeamSize(target_percentage=60, tolerance=5, max_iterations=10):
     """
         Iteratively changes brightness until beam is % of frame (within tolerance).
         """
     for iteration in range(max_iterations):
         try:
             minbeamsize = 2
-            beam_area = getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=minbeamsize,
-                                            contoursmax=1, getarea=True)[0]
+            image, areas = getBeamContour(show=False, beamthreshold=50, contourthreshold=190, minbeamsize=minbeamsize,
+                                            contoursmax=1, getarea=True)
+            beam_area = areas[0]
 
             height, _, _ = image.shape  # assume height = width
 
@@ -288,6 +289,7 @@ if __name__ == "__main__":
     confirm_microscope_state()
     centerBeam(shift_function=partial(apertureShift, KIND=1, SIZE=2, shiftscale=1))
     centerBeam(shift_function=partial(beamShift, shiftscale=1))
+    changeBeamSize(target_percentage=60, tolerance=5, max_iterations=10)
 
     # print(collectMetadata())
 
